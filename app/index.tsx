@@ -12,7 +12,8 @@ const styles = StyleSheet.create({
     backgroundColor: '#fff',
     borderBottomWidth: 1,
     borderBottomColor: '#E5E7EB',
-    paddingTop: 4,
+    paddingTop: 0,
+    height: 45,
   },
   tab: { paddingVertical: 6, paddingHorizontal: 20, alignItems: 'center' },
   tabActive: { borderBottomWidth: 2, borderBottomColor: '#6695FC' },
@@ -476,7 +477,7 @@ ${clipsXml}
     <View style={{ flex: 1 }}>
 
       {/* ── Tab Bar ── */}
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.tabBar}>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.tabBar} style={{ flexGrow: 0 }}>
         {(['hello', 'styles', 'import', 'playback', 'trimming', 'storyboard'] as const).map(s => (
           <TouchableOpacity
             key={s}
