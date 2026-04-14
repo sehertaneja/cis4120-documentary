@@ -23,10 +23,14 @@
   - Long-press a clip card (~0.4s) then drag up/down to reorder
   - Release to drop; list order updates immediately
   - Drop target highlighted in blue while dragging
+  - [`DraggableCard` component (lines 172–238)](https://github.com/sehertaneja/cis4120-documentary/blob/e980601/app/index.tsx#L172-L238) — PanResponder setup, long-press activation, animated translateY
+  - [Drag state & reorder logic (lines 262–303)](https://github.com/sehertaneja/cis4120-documentary/blob/e980601/app/index.tsx#L262-L303) — `onDragMoveRef`, `onDragEndRef`, splice-based reorder
 - **Req 7: Export as FCPXML** — Storyboard tab
   - Click "Export as FCPXML" to generate a Final Cut Pro XML file from the ordered clips
   - Each clip includes its source video reference, in/out trim points, title, and description
   - Downloads `documentary.fcpxml` — import into Final Cut Pro, Premiere, or DaVinci Resolve to assemble the edit
+  - [`generateFCPXML` (lines 323–375)](https://github.com/sehertaneja/cis4120-documentary/blob/e980601/app/index.tsx#L323-L375) — builds asset + clip XML with title, description, in/out points
+  - [`handleExport` (lines 377–395)](https://github.com/sehertaneja/cis4120-documentary/blob/e980601/app/index.tsx#L377-L395) — creates Blob, triggers browser download of `documentary.fcpxml`
 
 ## Tech Stack
 - React Native + Expo (web)
@@ -37,5 +41,3 @@
 - FCPXML generation (string templating, no dependencies)
 - Browser Blob API via React Native Web (file download)
 
-## AI Attribution
-Code for Req 6 (drag-and-drop) and Req 7 (FCPXML export) generated with Claude Code (claude-sonnet-4-6).
