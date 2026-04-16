@@ -1,9 +1,11 @@
 import { FontAwesome5, Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { AVPlaybackStatus, ResizeMode, Video } from 'expo-av';
 import * as DocumentPicker from 'expo-document-picker';
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Animated,
+  Image,
+  PanResponder,
   ScrollView, StyleSheet,
   Text, TextInput, TouchableOpacity, View
 } from 'react-native';
@@ -13,6 +15,7 @@ const CARD_H = 95;
 type Clip = {
   id: string; title: string; description: string;
   videoUri: string; videoName: string; inPoint: number; outPoint: number;
+  tag?: string;
 };
 
 function Sidebar({ screen, setScreen }: { screen: string; setScreen: (s: string) => void }) {
@@ -63,19 +66,206 @@ function Sidebar({ screen, setScreen }: { screen: string; setScreen: (s: string)
   );
 }
 
+function TrimScrubber({ duration, trimStart, trimEnd, position, onTrimStartChange, onTrimEndChange, onSeek }: {
+  duration: number; trimStart: number; trimEnd: number; position: number;
+  onTrimStartChange: (t: number) => void;
+  onTrimEndChange: (t: number) => void;
+  onSeek: (t: number) => void;
+}) {
+  const [trackWidth, setTrackWidth] = useState(0);
+  const trackWidthRef = useRef(0);
+  const trimStartRef = useRef(trimStart);
+  const trimEndRef = useRef(trimEnd);
+  const durationRef = useRef(duration);
+  trimStartRef.current = trimStart;
+  trimEndRef.current = trimEnd;
+  durationRef.current = duration;
+
+  const leftStartX = useRef(0);
+  const rightStartX = useRef(0);
+  const HANDLE_W = 20;
+
+  const trackPan = useRef(PanResponder.create({
+    onStartShouldSetPanResponder: (e) => {
+      if (!trackWidthRef.current || !durationRef.current) return false;
+      const x = e.nativeEvent.locationX;
+      const spx = (trimStartRef.current / durationRef.current) * trackWidthRef.current;
+      const epx = (trimEndRef.current / durationRef.current) * trackWidthRef.current;
+      return Math.abs(x - spx) > HANDLE_W * 2 && Math.abs(x - epx) > HANDLE_W * 2;
+    },
+    onMoveShouldSetPanResponder: () => false,
+    onPanResponderGrant: (e) => {
+      if (!trackWidthRef.current || !durationRef.current) return;
+      const t = Math.max(0, Math.min((e.nativeEvent.locationX / trackWidthRef.current) * durationRef.current, durationRef.current));
+      onSeek(t);
+    },
+  })).current;
+
+  const leftPan = useRef(PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onPanResponderGrant: () => {
+      leftStartX.current = durationRef.current > 0
+        ? (trimStartRef.current / durationRef.current) * trackWidthRef.current : 0;
+    },
+    onPanResponderMove: (_, gs) => {
+      if (!trackWidthRef.current || !durationRef.current) return;
+      const max = (trimEndRef.current / durationRef.current) * trackWidthRef.current - HANDLE_W;
+      const x = Math.max(0, Math.min(leftStartX.current + gs.dx, max));
+      const t = (x / trackWidthRef.current) * durationRef.current;
+      onTrimStartChange(t);
+      onSeek(t);
+    },
+  })).current;
+
+  const rightPan = useRef(PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onPanResponderGrant: () => {
+      rightStartX.current = durationRef.current > 0
+        ? (trimEndRef.current / durationRef.current) * trackWidthRef.current : trackWidthRef.current;
+    },
+    onPanResponderMove: (_, gs) => {
+      if (!trackWidthRef.current || !durationRef.current) return;
+      const min = (trimStartRef.current / durationRef.current) * trackWidthRef.current + HANDLE_W;
+      const x = Math.max(min, Math.min(rightStartX.current + gs.dx, trackWidthRef.current));
+      const t = (x / trackWidthRef.current) * durationRef.current;
+      onTrimEndChange(t);
+      onSeek(t);
+    },
+  })).current;
+
+  const startPx = trackWidth > 0 && duration > 0 ? (trimStart / duration) * trackWidth : 0;
+  const endPx = trackWidth > 0 && duration > 0 ? (trimEnd / duration) * trackWidth : trackWidth;
+  const posPx = trackWidth > 0 && duration > 0 ? (position / duration) * trackWidth : 0;
+
+  return (
+    <View>
+      <View
+        {...trackPan.panHandlers}
+        style={{ height: 48, justifyContent: 'center' }}
+        onLayout={e => { trackWidthRef.current = e.nativeEvent.layout.width; setTrackWidth(e.nativeEvent.layout.width); }}
+      >
+        <View style={s.scrubTrack} />
+        <View style={[s.scrubRange, { left: startPx, width: Math.max(0, endPx - startPx) }]} />
+        <View style={[s.scrubPlayhead, { left: posPx }]} />
+        <Animated.View {...leftPan.panHandlers} style={[s.scrubHandle, { left: startPx - HANDLE_W / 2 }]}>
+          <View style={s.scrubHandleBar} /><View style={s.scrubHandleBar} />
+        </Animated.View>
+        <Animated.View {...rightPan.panHandlers} style={[s.scrubHandle, { left: endPx - HANDLE_W / 2 }]}>
+          <View style={s.scrubHandleBar} /><View style={s.scrubHandleBar} />
+        </Animated.View>
+      </View>
+      <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 6 }}>
+        <Text style={s.scrubLabelBlue}>{trimStart.toFixed(2)}s  IN</Text>
+        <Text style={s.scrubLabelGray}>{position.toFixed(2)}s / {duration.toFixed(2)}s</Text>
+        <Text style={s.scrubLabelBlue}>OUT  {trimEnd.toFixed(2)}s</Text>
+      </View>
+    </View>
+  );
+}
+
+function VideoThumb({ uri, seekTo }: { uri: string; seekTo: number }) {
+  const [thumb, setThumb] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const video = document.createElement('video');
+    video.src = uri;
+    video.addEventListener('loadedmetadata', () => { video.currentTime = seekTo; });
+    video.addEventListener('seeked', () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 120; canvas.height = 68;
+      const ctx = canvas.getContext('2d');
+      if (ctx) { ctx.drawImage(video, 0, 0, 120, 68); setThumb(canvas.toDataURL('image/jpeg', 0.8)); }
+    }, { once: true });
+    video.load();
+  }, [uri, seekTo]);
+
+  if (!thumb) return (
+    <View style={s.thumbBox}>
+      <MaterialCommunityIcons name="movie-open" size={24} color="#6695FC" />
+    </View>
+  );
+  return <Image source={{ uri: thumb }} style={s.thumbBox} />;
+}
+
+function DraggableCard({
+  clip, index, isDragging, isHover,
+  dragIdxRef, onDragStart, onDragMoveRef, onDragEndRef,
+}: {
+  clip: Clip; index: number; isDragging: boolean; isHover: boolean;
+  dragIdxRef: { current: number };
+  onDragStart: (i: number) => void;
+  onDragMoveRef: { current: (i: number, dy: number) => void };
+  onDragEndRef: { current: (i: number, dy: number) => void };
+}) {
+  const animY = useRef(new Animated.Value(0)).current;
+  const indexRef = useRef(index);
+  indexRef.current = index;
+
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => false,
+      onStartShouldSetPanResponderCapture: () => false,
+      onMoveShouldSetPanResponder: () => dragIdxRef.current === indexRef.current,
+      onMoveShouldSetPanResponderCapture: () => dragIdxRef.current === indexRef.current,
+      onPanResponderMove: (_, gs) => {
+        animY.setValue(gs.dy);
+        onDragMoveRef.current(indexRef.current, gs.dy);
+      },
+      onPanResponderRelease: (_, gs) => {
+        onDragEndRef.current(indexRef.current, gs.dy);
+        animY.setValue(0);
+      },
+      onPanResponderTerminate: () => {
+        onDragEndRef.current(indexRef.current, 0);
+        animY.setValue(0);
+      },
+    })
+  ).current;
+
+  return (
+    <Animated.View
+      {...panResponder.panHandlers}
+      style={isDragging ? { transform: [{ translateY: animY }], opacity: 0.65, zIndex: 999 } : { zIndex: 1 }}
+    >
+      <TouchableOpacity
+        onLongPress={() => { animY.setValue(0); onDragStart(index); }}
+        delayLongPress={150}
+        style={[s.storyCard, isHover && !isDragging && s.storyCardHover]}
+      >
+        <Text style={s.storyCardNum}>#{index + 1}</Text>
+        <View style={{ width: 10 }} />
+        <VideoThumb uri={clip.videoUri} seekTo={clip.inPoint} />
+        <View style={{ flex: 1, marginLeft: 10 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 2 }}>
+            <Text style={s.storyCardTitle}>{clip.title}</Text>
+            {clip.tag && (
+              <View style={[s.clipTagBadge, {
+                backgroundColor: clip.tag === 'Interview' ? '#EEF2FF' : clip.tag === 'B-roll' ? '#F3F4F6' : '#FEFCE8',
+              }]}>
+                <Text style={[s.clipTagText, {
+                  color: clip.tag === 'Interview' ? '#6695FC' : clip.tag === 'B-roll' ? '#1F2937' : '#854D0E',
+                }]}>{clip.tag}</Text>
+              </View>
+            )}
+          </View>
+          <Text style={s.storyCardNotes} numberOfLines={1}>{clip.description}</Text>
+          <Text style={s.storyCardNotes}>{(clip.outPoint - clip.inPoint).toFixed(1)}s — {clip.videoName}</Text>
+        </View>
+      </TouchableOpacity>
+    </Animated.View>
+  );
+}
+
 export default function App() {
   const [screen, setScreen] = useState('home');
   const [importedFiles, setImportedFiles] = useState<any[]>([]);
   const [activeFilter, setActiveFilter] = useState('Clips');
   const [selectedFile, setSelectedFile] = useState<any>(null);
-  const [isPlaying, setIsPlaying] = useState(false);
   const [position, setPosition] = useState(0);
   const [duration, setDuration] = useState(0);
-  const [seekInput, setSeekInput] = useState('');
   const [trimStart, setTrimStart] = useState(0);
   const [trimEnd, setTrimEnd] = useState(0);
-  const [trimStartInput, setTrimStartInput] = useState('');
-  const [trimEndInput, setTrimEndInput] = useState('');
   const [clipTitle, setClipTitle] = useState('');
   const [clipDescription, setClipDescription] = useState('');
   const [clips, setClips] = useState<Clip[]>([]);
@@ -118,63 +308,92 @@ export default function App() {
     }
   };
 
-  const handlePlayPause = async () => {
-    if (videoRef.current) {
-      if (isPlaying) { await videoRef.current.pauseAsync(); }
-      else { await videoRef.current.playAsync(); }
-      setIsPlaying(!isPlaying);
-    }
-  };
-
-  const handleSeek = async () => {
-    const timeMs = parseFloat(seekInput) * 1000;
-    if (videoRef.current && !isNaN(timeMs)) await videoRef.current.setPositionAsync(timeMs);
+  const seekTo = async (t: number) => {
+    if (videoRef.current) await videoRef.current.setPositionAsync(t * 1000);
   };
 
   const onPlaybackStatusUpdate = (status: AVPlaybackStatus) => {
     if (status.isLoaded) {
       setPosition(status.positionMillis / 1000);
-      setDuration(status.durationMillis ? status.durationMillis / 1000 : 0);
-      setIsPlaying(status.isPlaying);
+      const dur = status.durationMillis ? status.durationMillis / 1000 : 0;
+      setDuration(dur);
+      if (dur > 0) setTrimEnd(prev => prev === 0 ? dur : prev);
     }
   };
 
   const handleLoadFile = (file: any) => {
     setSelectedFile(file);
-    setPosition(0); setDuration(0); setIsPlaying(false);
+    setPosition(0); setDuration(0);
     setTrimStart(0); setTrimEnd(0);
-    setTrimStartInput(''); setTrimEndInput('');
     setScreen('moments');
   };
-
-  const handleSetTrimStart = () => { const t = parseFloat(trimStartInput); if (!isNaN(t)) setTrimStart(t); };
-  const handleSetTrimEnd = () => { const t = parseFloat(trimEndInput); if (!isNaN(t)) setTrimEnd(t); };
-  const handleSetCurrentAsTrimStart = () => { setTrimStart(position); setTrimStartInput(position.toFixed(2)); };
-  const handleSetCurrentAsTrimEnd = () => { setTrimEnd(position); setTrimEndInput(position.toFixed(2)); };
 
   const handleSaveClip = () => {
     if (!selectedFile || !clipTitle || trimEnd <= trimStart) return;
     const newClip: Clip = {
       id: Date.now().toString(), title: clipTitle, description: clipDescription,
       videoUri: selectedFile.uri, videoName: selectedFile.name,
-      inPoint: trimStart, outPoint: trimEnd,
+      inPoint: trimStart, outPoint: trimEnd, tag: selectedFile.tag,
     };
     setClips(prev => [...prev, newClip]);
     clipsRef.current = [...clipsRef.current, newClip];
     setClipTitle(''); setClipDescription('');
+    setScreen('storyboard');
+  };
+
+  const generateFCPXML = (allClips: Clip[]): string => {
+    const esc = (str: string) => str
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    if (allClips.length === 0) return '';
+    const assets = allClips.map((clip, i) => ({
+      id: `r${i + 2}`, clip,
+      duration: clip.outPoint - clip.inPoint,
+      src: `file:///${clip.videoName}`,
+    }));
+    const totalDur = assets.reduce((sum, a) => sum + a.duration, 0);
+    let offset = 0;
+    const clipsXml = assets.map(a => {
+      const xml = `            <clip name="${esc(a.clip.title)}" ref="${a.id}" offset="${offset}s" duration="${a.duration}s" start="${a.clip.inPoint}s">
+              <note>${esc(a.clip.description)}</note>
+            </clip>`;
+      offset += a.duration;
+      return xml;
+    }).join('\n');
+    const assetsXml = assets.map(a =>
+      `    <asset id="${a.id}" name="${esc(a.clip.title)}" uid="${a.id}" src="${a.src}" start="0s" duration="${a.duration}s" hasVideo="1" hasAudio="1">
+      <media-rep kind="original-media" src="${a.src}"/>
+    </asset>`
+    ).join('\n');
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.9">
+  <resources>
+    <format id="r1" name="FFVideoFormat1080p25" frameDuration="1/25s" width="1920" height="1080"/>
+${assetsXml}
+  </resources>
+  <library>
+    <event name="Documentary">
+      <project name="My Documentary">
+        <sequence format="r1" duration="${totalDur}s" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+          <spine>
+${clipsXml}
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>`;
   };
 
   const handleExport = () => {
-    const data = clipsRef.current.map(c => ({
-      title: c.title, notes: c.description,
-      inPoint: c.inPoint, outPoint: c.outPoint,
-      videoName: c.videoName,
-    }));
+    const xml = generateFCPXML(clipsRef.current);
+    if (!xml) return;
     if (typeof document !== 'undefined') {
-      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const blob = new Blob([xml], { type: 'application/xml' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
-      a.href = url; a.download = 'storyboard.json';
+      a.href = url; a.download = 'documentary.fcpxml';
       document.body.appendChild(a); a.click();
       document.body.removeChild(a); URL.revokeObjectURL(url);
     }
@@ -308,53 +527,28 @@ export default function App() {
                   useNativeControls
                 />
                 <View style={s.card}>
-                  <View style={s.timeDisplay}>
-                    <Text style={s.timeText}>{position.toFixed(2)}s / {duration.toFixed(2)}s</Text>
-                  </View>
-                  <View style={s.buttonRow}>
-                    <TouchableOpacity style={s.controlBtn} onPress={handlePlayPause}>
-                      <Ionicons name={isPlaying ? 'pause' : 'play'} size={18} color="#fff" />
-                      <Text style={s.controlBtnText}>{isPlaying ? 'Pause' : 'Play'}</Text>
-                    </TouchableOpacity>
-                  </View>
-                  <Text style={s.inputLabel}>Seek to (seconds)</Text>
-                  <View style={s.inputRow}>
-                    <TextInput style={s.input} placeholder="0.00" value={seekInput} onChangeText={setSeekInput} keyboardType="numeric" />
-                    <TouchableOpacity style={s.seekBtn} onPress={handleSeek}>
-                      <Text style={s.seekBtnText}>Seek</Text>
-                    </TouchableOpacity>
-                  </View>
+                  <Text style={s.cardTitle}>Trim</Text>
+                  <TrimScrubber
+                    duration={duration}
+                    trimStart={trimStart}
+                    trimEnd={trimEnd}
+                    position={position}
+                    onTrimStartChange={t => setTrimStart(t)}
+                    onTrimEndChange={t => setTrimEnd(t)}
+                    onSeek={seekTo}
+                  />
                 </View>
 
-                <View style={s.card}>
-                  <Text style={s.cardTitle}>Save Moment</Text>
-                  <View style={s.trimDisplay}>
-                    <View style={s.trimPoint}>
-                      <Text style={s.trimLabel}>START</Text>
-                      <Text style={s.trimValue}>{trimStart.toFixed(2)}s</Text>
-                    </View>
-                    <MaterialCommunityIcons name="arrow-right" size={20} color="#5A5F67" />
-                    <View style={s.trimPoint}>
-                      <Text style={s.trimLabel}>END</Text>
-                      <Text style={s.trimValue}>{trimEnd.toFixed(2)}s</Text>
-                    </View>
+                {trimEnd > trimStart && (
+                  <View style={s.card}>
+                    <Text style={s.cardTitle}>Save Moment</Text>
+                    <TextInput style={s.input} placeholder="Moment title" value={clipTitle} onChangeText={setClipTitle} />
+                    <TextInput style={[s.input, { height: 60, marginTop: 8 }]} placeholder="Notes..." value={clipDescription} onChangeText={setClipDescription} multiline />
+                    <TouchableOpacity style={[s.controlBtn, { marginTop: 10, backgroundColor: '#16A34A' }]} onPress={handleSaveClip} disabled={!clipTitle}>
+                      <Text style={s.controlBtnText}>Save Moment</Text>
+                    </TouchableOpacity>
                   </View>
-                  <TouchableOpacity style={s.quickSetBtn} onPress={handleSetCurrentAsTrimStart}>
-                    <Text style={s.quickSetBtnText}>Set Start ({position.toFixed(2)}s)</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity style={s.quickSetBtn} onPress={handleSetCurrentAsTrimEnd}>
-                    <Text style={s.quickSetBtnText}>Set End ({position.toFixed(2)}s)</Text>
-                  </TouchableOpacity>
-                  {trimEnd > trimStart && (
-                    <>
-                      <TextInput style={[s.input, { marginTop: 10 }]} placeholder="Moment title" value={clipTitle} onChangeText={setClipTitle} />
-                      <TextInput style={[s.input, { height: 60, marginTop: 8 }]} placeholder="Notes..." value={clipDescription} onChangeText={setClipDescription} multiline />
-                      <TouchableOpacity style={[s.controlBtn, { marginTop: 10, backgroundColor: '#16A34A' }]} onPress={handleSaveClip} disabled={!clipTitle}>
-                        <Text style={s.controlBtnText}>Save Moment</Text>
-                      </TouchableOpacity>
-                    </>
-                  )}
-                </View>
+                )}
               </>
             )}
           </ScrollView>
@@ -373,23 +567,21 @@ export default function App() {
             ) : (
               <>
                 {clips.map((clip, i) => (
-                  <Animated.View key={i} style={dragIdx === i ? { opacity: 0.65, zIndex: 999 } : { zIndex: 1 }}>
-                    <TouchableOpacity
-                      onLongPress={() => { dragIdxRef.current = i; setDragIdx(i); setHoverIdx(i); }}
-                      delayLongPress={400}
-                      style={[s.storyCard, hoverIdx === i && dragIdx !== i && s.storyCardHover]}
-                    >
-                      <MaterialCommunityIcons name="drag-vertical" size={22} color="#9CA3AF" />
-                      <View style={{ flex: 1, marginLeft: 8 }}>
-                        <Text style={s.storyCardTitle}>{clip.title}</Text>
-                        <Text style={s.storyCardNotes}>{clip.description}</Text>
-                      </View>
-                    </TouchableOpacity>
-                  </Animated.View>
+                  <DraggableCard
+                    key={clip.id}
+                    clip={clip}
+                    index={i}
+                    isDragging={dragIdx === i}
+                    isHover={hoverIdx === i}
+                    dragIdxRef={dragIdxRef}
+                    onDragStart={(idx) => { dragIdxRef.current = idx; setDragIdx(idx); setHoverIdx(idx); }}
+                    onDragMoveRef={onDragMoveRef}
+                    onDragEndRef={onDragEndRef}
+                  />
                 ))}
                 <TouchableOpacity style={s.exportBtn} onPress={handleExport}>
-                  <FontAwesome5 name="share-alt" size={14} color="#fff" />
-                  <Text style={s.exportBtnText}>Export Storyboard</Text>
+                  <FontAwesome5 name="file-code" size={14} color="#fff" />
+                  <Text style={s.exportBtnText}>Export as FCPXML</Text>
                 </TouchableOpacity>
               </>
             )}
@@ -553,6 +745,17 @@ const s = StyleSheet.create({
   quickSetBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: '#EEF2FF', borderRadius: 8, padding: 10, marginTop: 6, borderWidth: 1, borderColor: '#DBEAFE' },
   quickSetBtnText: { color: '#6695FC', fontSize: 13, fontWeight: '500' },
 
+  scrubTrack: { height: 6, backgroundColor: '#E5E7EB', borderRadius: 3 },
+  scrubRange: { position: 'absolute', height: 6, backgroundColor: '#6695FC', borderRadius: 3, top: 21 },
+  scrubPlayhead: { position: 'absolute', width: 2, height: 48, backgroundColor: '#1F2937', top: 0, marginLeft: -1 },
+  scrubHandle: { position: 'absolute', width: 20, height: 36, backgroundColor: '#6695FC', borderRadius: 6, top: 6, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 3 },
+  scrubHandleBar: { width: 2, height: 14, backgroundColor: 'rgba(255,255,255,0.8)', borderRadius: 1 },
+  scrubLabelBlue: { fontSize: 11, color: '#6695FC', fontFamily: 'monospace', fontWeight: '600' },
+  scrubLabelGray: { fontSize: 11, color: '#9CA3AF', fontFamily: 'monospace' },
+
+  thumbBox: { width: 80, height: 56, borderRadius: 8, backgroundColor: '#EEF2FF', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
+  clipTagBadge: { alignSelf: 'flex-start', paddingVertical: 2, paddingHorizontal: 7, borderRadius: 20, marginTop: 4 },
+  clipTagText: { fontSize: 10, fontWeight: '600' },
   storyCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#fff', borderRadius: 12, padding: 14, marginBottom: 8, borderWidth: 1, borderColor: '#E5E7EB', height: CARD_H },
   storyCardHover: { borderColor: '#6695FC', backgroundColor: '#EEF2FF' },
   storyCardTitle: { fontSize: 14, fontWeight: '600', color: '#1F2937', marginBottom: 2 },
