@@ -5,6 +5,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   Animated,
   Image,
+  Modal,
   PanResponder,
   ScrollView, StyleSheet,
   Text, TextInput, TouchableOpacity, View
@@ -83,7 +84,7 @@ function TrimScrubber({ duration, trimStart, trimEnd, position, onTrimStartChang
 
   const leftStartX = useRef(0);
   const rightStartX = useRef(0);
-  const HANDLE_W = 20;
+  const HANDLE_W = 16;
 
   const trackPan = useRef(PanResponder.create({
     onStartShouldSetPanResponder: (e) => {
@@ -141,7 +142,7 @@ function TrimScrubber({ duration, trimStart, trimEnd, position, onTrimStartChang
     <View>
       <View
         {...trackPan.panHandlers}
-        style={{ height: 48, justifyContent: 'center' }}
+        style={{ height: 34, justifyContent: 'center' }}
         onLayout={e => { trackWidthRef.current = e.nativeEvent.layout.width; setTrackWidth(e.nativeEvent.layout.width); }}
       >
         <View style={s.scrubTrack} />
@@ -190,13 +191,14 @@ function VideoThumb({ uri, seekTo }: { uri: string; seekTo: number }) {
 
 function DraggableCard({
   clip, index, isDragging, isHover,
-  dragIdxRef, onDragStart, onDragMoveRef, onDragEndRef,
+  dragIdxRef, onDragStart, onDragMoveRef, onDragEndRef, onDelete,
 }: {
   clip: Clip; index: number; isDragging: boolean; isHover: boolean;
   dragIdxRef: { current: number };
   onDragStart: (i: number) => void;
   onDragMoveRef: { current: (i: number, dy: number) => void };
   onDragEndRef: { current: (i: number, dy: number) => void };
+  onDelete: () => void;
 }) {
   const animY = useRef(new Animated.Value(0)).current;
   const indexRef = useRef(index);
@@ -252,6 +254,9 @@ function DraggableCard({
           <Text style={s.storyCardNotes} numberOfLines={1}>{clip.description}</Text>
           <Text style={s.storyCardNotes}>{(clip.outPoint - clip.inPoint).toFixed(1)}s — {clip.videoName}</Text>
         </View>
+        <TouchableOpacity onPress={onDelete} style={s.deleteBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+          <MaterialCommunityIcons name="trash-can-outline" size={18} color="#EF4444" />
+        </TouchableOpacity>
       </TouchableOpacity>
     </Animated.View>
   );
@@ -259,21 +264,48 @@ function DraggableCard({
 
 export default function App() {
   const [screen, setScreen] = useState('home');
-  const [importedFiles, setImportedFiles] = useState<any[]>([]);
-  const [activeFilter, setActiveFilter] = useState('Clips');
+  const [projects, setProjects] = useState([
+    { id: '1', name: 'My Documentary', files: [] as any[], clips: [] as Clip[] },
+  ]);
+  const [activeProjectId, setActiveProjectId] = useState('1');
+  const [showNewProjectModal, setShowNewProjectModal] = useState(false);
+  const [newProjectName, setNewProjectName] = useState('');
+  const [activeFilter, setActiveFilter] = useState('All');
   const [selectedFile, setSelectedFile] = useState<any>(null);
   const [position, setPosition] = useState(0);
   const [duration, setDuration] = useState(0);
   const [trimStart, setTrimStart] = useState(0);
   const [trimEnd, setTrimEnd] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [mainWidth, setMainWidth] = useState(0);
+  const trimEndRef = useRef(0);
   const [clipTitle, setClipTitle] = useState('');
   const [clipDescription, setClipDescription] = useState('');
-  const [clips, setClips] = useState<Clip[]>([]);
   const [dragIdx, setDragIdx] = useState(-1);
   const [hoverIdx, setHoverIdx] = useState(-1);
   const dragIdxRef = useRef(-1);
   const clipsRef = useRef<Clip[]>([]);
+
+  const activeProject = projects.find(p => p.id === activeProjectId) ?? projects[0];
+  const importedFiles = activeProject.files;
+  const clips = activeProject.clips;
   clipsRef.current = clips;
+
+  const setImportedFiles = (updater: any[] | ((prev: any[]) => any[])) => {
+    setProjects(prev => prev.map(p =>
+      p.id === activeProjectId
+        ? { ...p, files: typeof updater === 'function' ? updater(p.files) : updater }
+        : p
+    ));
+  };
+
+  const setClips = (updater: Clip[] | ((prev: Clip[]) => Clip[])) => {
+    setProjects(prev => prev.map(p =>
+      p.id === activeProjectId
+        ? { ...p, clips: typeof updater === 'function' ? updater(p.clips) : updater }
+        : p
+    ));
+  };
   const videoRef = useRef<Video>(null);
   const onDragMoveRef = useRef((_i: number, _dy: number) => {});
   const onDragEndRef = useRef((_i: number, _dy: number) => {});
@@ -314,10 +346,15 @@ export default function App() {
 
   const onPlaybackStatusUpdate = (status: AVPlaybackStatus) => {
     if (status.isLoaded) {
-      setPosition(status.positionMillis / 1000);
+      const pos = status.positionMillis / 1000;
+      setPosition(pos);
+      setIsPlaying(status.isPlaying);
       const dur = status.durationMillis ? status.durationMillis / 1000 : 0;
       setDuration(dur);
-      if (dur > 0) setTrimEnd(prev => prev === 0 ? dur : prev);
+      if (dur > 0) setTrimEnd(prev => { const next = prev === 0 ? dur : prev; trimEndRef.current = next; return next; });
+      if (status.isPlaying && trimEndRef.current > 0 && pos >= trimEndRef.current) {
+        videoRef.current?.pauseAsync();
+      }
     }
   };
 
@@ -403,49 +440,83 @@ ${clipsXml}
     setImportedFiles(prev => prev.map((f, i) => i === index ? { ...f, tag } : f));
   };
 
-  const filteredFiles = activeFilter === 'Clips'
+  const filteredFiles = activeFilter === 'All'
     ? importedFiles
     : importedFiles.filter(f => f.tag === activeFilter);
 
   return (
     <View style={s.root}>
       <Sidebar screen={screen} setScreen={setScreen} />
-      <View style={s.main}>
+      <View style={s.main} onLayout={e => setMainWidth(e.nativeEvent.layout.width)}>
 
         {/* ── Home ── */}
         {screen === 'home' && (
           <ScrollView contentContainerStyle={s.content}>
             <Text style={s.pageTitle}>Documentary Projects</Text>
-            <View style={s.filterRow}>
-              {['All', 'Interviews', 'B-roll'].map(f => (
-                <TouchableOpacity key={f} style={[s.filterBtn, f === 'All' && s.filterBtnActive]}>
-                  <Text style={[s.filterBtnText, f === 'All' && s.filterBtnTextActive]}>{f}</Text>
+            {projects.map(project => (
+              <TouchableOpacity key={project.id} style={s.projectCard} onPress={() => { setActiveProjectId(project.id); setScreen('clips'); }}>
+                <View style={s.projectThumb}>
+                  <MaterialCommunityIcons name="movie-open" size={28} color="#6695FC" />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={s.projectTitle}>{project.name}</Text>
+                  <Text style={s.projectMeta}>Last edited: Today · {project.files.length} clips</Text>
+                </View>
+                <TouchableOpacity
+                  style={s.deleteBtn}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                  onPress={(e: any) => { e.stopPropagation?.(); setProjects(prev => prev.filter(p => p.id !== project.id)); }}
+                >
+                  <MaterialCommunityIcons name="trash-can-outline" size={18} color="#EF4444" />
                 </TouchableOpacity>
-              ))}
-            </View>
-            <TouchableOpacity style={s.projectCard} onPress={() => setScreen('clips')}>
-              <View style={s.projectThumb}>
-                <MaterialCommunityIcons name="movie-open" size={28} color="#6695FC" />
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={s.projectTitle}>My Documentary</Text>
-                <Text style={s.projectMeta}>Last edited: Today · {importedFiles.length} clips</Text>
-              </View>
-              <MaterialCommunityIcons name="chevron-right" size={20} color="#9CA3AF" />
-            </TouchableOpacity>
-            <TouchableOpacity style={s.newProjectBtn} onPress={handleImport}>
+              </TouchableOpacity>
+            ))}
+            <TouchableOpacity style={s.newProjectBtn} onPress={() => { setNewProjectName(''); setShowNewProjectModal(true); }}>
               <MaterialCommunityIcons name="plus" size={18} color="#5A5F67" />
               <Text style={s.newProjectText}>New Project</Text>
             </TouchableOpacity>
           </ScrollView>
         )}
 
+        {/* ── New Project Modal ── */}
+        <Modal transparent animationType="fade" visible={showNewProjectModal} onRequestClose={() => setShowNewProjectModal(false)}>
+          <View style={s.modalOverlay}>
+            <View style={s.modalBox}>
+              <Text style={s.modalTitle}>New Project</Text>
+              <TextInput
+                style={s.modalInput}
+                placeholder="Project name"
+                placeholderTextColor="#9CA3AF"
+                value={newProjectName}
+                onChangeText={setNewProjectName}
+                autoFocus
+              />
+              <View style={s.modalBtnRow}>
+                <TouchableOpacity style={s.modalCancelBtn} onPress={() => setShowNewProjectModal(false)}>
+                  <Text style={s.modalCancelText}>Cancel</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[s.modalCreateBtn, !newProjectName.trim() && { opacity: 0.4 }]}
+                  onPress={() => {
+                    if (!newProjectName.trim()) return;
+                    setProjects(prev => [...prev, { id: Date.now().toString(), name: newProjectName.trim(), files: [], clips: [] }]);
+                    setShowNewProjectModal(false);
+                  }}
+                  disabled={!newProjectName.trim()}
+                >
+                  <Text style={s.modalCreateText}>Create</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </Modal>
+
         {/* ── Clips ── */}
         {screen === 'clips' && (
           <ScrollView contentContainerStyle={s.content}>
-            <Text style={s.pageTitle}>My Documentary</Text>
+            <Text style={s.pageTitle}>{projects.find(p => p.id === activeProjectId)?.name ?? 'Project'}</Text>
             <View style={s.filterRow}>
-              {['Clips', 'Interview', 'B-roll'].map(f => (
+              {['All', 'Clip', 'Interview', 'B-roll'].map(f => (
                 <TouchableOpacity
                   key={f}
                   style={[s.filterBtn, activeFilter === f && s.filterBtnActive]}
@@ -465,7 +536,7 @@ ${clipsXml}
                 <MaterialCommunityIcons name="movie-open-outline" size={48} color="#D1D5DB" />
                 <Text style={s.emptyText}>No clips here yet</Text>
                 <Text style={s.emptySubtext}>
-                  {activeFilter === 'Clips' ? 'Click "Upload clips" to import video or audio' : `No clips tagged as "${activeFilter}" yet`}
+                  {activeFilter === 'All' ? 'Click "Upload clips" to import video or audio' : `No clips tagged as "${activeFilter}" yet`}
                 </Text>
               </View>
             ) : (
@@ -473,17 +544,16 @@ ${clipsXml}
                 {filteredFiles.map((file, i) => {
                   const realIndex = importedFiles.indexOf(file);
                   return (
-                    <TouchableOpacity key={i} style={s.clipCard} onPress={() => handleLoadFile(file)}>
-                      <View style={s.clipThumb}>
+                    <View key={i} style={s.clipCard}>
+                      <TouchableOpacity style={s.clipThumb} onPress={() => handleLoadFile(file)}>
                         <MaterialCommunityIcons name="play-circle" size={32} color="#6695FC" />
-                      </View>
+                      </TouchableOpacity>
                       <Text style={s.clipName} numberOfLines={2}>{file.name}</Text>
-                      {/* Tag selector — uses yellow for Clip, blue for Interview, dark for B-roll */}
                       <View style={s.tagRow}>
                         {(['Clip', 'Interview', 'B-roll'] as const).map(tag => (
                           <TouchableOpacity
                             key={tag}
-                            onPress={(e: any) => { e.stopPropagation?.(); setFileTag(realIndex, tag); }}
+                            onPress={() => setFileTag(realIndex, tag)}
                             style={[
                               s.tag,
                               file.tag === tag && tag === 'Clip' && s.tagClip,
@@ -491,13 +561,19 @@ ${clipsXml}
                               file.tag === tag && tag === 'B-roll' && s.tagBroll,
                             ]}
                           >
-                            <Text style={[s.tagText, file.tag === tag && s.tagTextActive]}>
+                            <Text style={[s.tagText, file.tag === tag && s.tagTextActive, file.tag === tag && tag === 'B-roll' && s.tagTextBroll]}>
                               {tag}
                             </Text>
                           </TouchableOpacity>
                         ))}
+                        <TouchableOpacity
+                          onPress={() => setImportedFiles(prev => prev.filter((_, idx) => idx !== realIndex))}
+                          style={{ marginLeft: 'auto' }}
+                        >
+                          <MaterialCommunityIcons name="trash-can-outline" size={16} color="#EF4444" />
+                        </TouchableOpacity>
                       </View>
-                    </TouchableOpacity>
+                    </View>
                   );
                 })}
               </View>
@@ -517,26 +593,40 @@ ${clipsXml}
               </View>
             ) : (
               <>
-                <Video
-                  ref={videoRef}
-                  source={{ uri: selectedFile.uri }}
-                  style={s.video}
-                  resizeMode={ResizeMode.CONTAIN}
-                  onPlaybackStatusUpdate={onPlaybackStatusUpdate}
-                  shouldPlay={false}
-                  useNativeControls
-                />
+                {mainWidth > 64 && (
+                  <View style={s.videoWrapper}>
+                    <Video
+                      ref={videoRef}
+                      source={{ uri: selectedFile.uri }}
+                      style={{ width: mainWidth - 64, height: Math.round((mainWidth - 64) * 9 / 16) }}
+                      resizeMode={ResizeMode.CONTAIN}
+                      onPlaybackStatusUpdate={onPlaybackStatusUpdate}
+                      shouldPlay={false}
+                      useNativeControls
+                    />
+                  </View>
+                )}
                 <View style={s.card}>
                   <Text style={s.cardTitle}>Trim</Text>
-                  <TrimScrubber
-                    duration={duration}
-                    trimStart={trimStart}
-                    trimEnd={trimEnd}
-                    position={position}
-                    onTrimStartChange={t => setTrimStart(t)}
-                    onTrimEndChange={t => setTrimEnd(t)}
-                    onSeek={seekTo}
-                  />
+                  <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 12 }}>
+                    <TouchableOpacity
+                      style={s.playPauseBtn}
+                      onPress={() => isPlaying ? videoRef.current?.pauseAsync() : videoRef.current?.playAsync()}
+                    >
+                      <Ionicons name={isPlaying ? 'pause' : 'play'} size={16} color="#fff" />
+                    </TouchableOpacity>
+                    <View style={{ flex: 1 }}>
+                      <TrimScrubber
+                        duration={duration}
+                        trimStart={trimStart}
+                        trimEnd={trimEnd}
+                        position={position}
+                        onTrimStartChange={t => setTrimStart(t)}
+                        onTrimEndChange={t => { trimEndRef.current = t; setTrimEnd(t); }}
+                        onSeek={seekTo}
+                      />
+                    </View>
+                  </View>
                 </View>
 
                 {trimEnd > trimStart && (
@@ -577,6 +667,7 @@ ${clipsXml}
                     onDragStart={(idx) => { dragIdxRef.current = idx; setDragIdx(idx); setHoverIdx(idx); }}
                     onDragMoveRef={onDragMoveRef}
                     onDragEndRef={onDragEndRef}
+                    onDelete={() => setClips(prev => prev.filter(c => c.id !== clip.id))}
                   />
                 ))}
                 <TouchableOpacity style={s.exportBtn} onPress={handleExport}>
@@ -719,12 +810,14 @@ const s = StyleSheet.create({
   tagBroll: { backgroundColor: '#1F2937', borderColor: '#1F2937' },
   tagText: { fontSize: 10, fontWeight: '500', color: '#5A5F67' },
   tagTextActive: { color: '#111827' },
+  tagTextBroll: { color: '#fff' },
 
   emptyState: { alignItems: 'center', marginTop: 60 },
   emptyText: { fontSize: 15, fontWeight: '500', color: '#9CA3AF', marginTop: 12 },
   emptySubtext: { fontSize: 12, fontWeight: '300', color: '#D1D5DB', marginTop: 4 },
 
-  video: { width: '100%', aspectRatio: 16 / 9, backgroundColor: '#000', borderRadius: 12, marginBottom: 12 },
+  videoWrapper: { backgroundColor: '#000', borderRadius: 12, marginBottom: 12, overflow: 'hidden' },
+  video: {},
   card: { backgroundColor: '#fff', borderRadius: 12, padding: 16, marginBottom: 12, borderWidth: 1, borderColor: '#E5E7EB' },
   cardTitle: { fontSize: 15, fontWeight: '600', color: '#1F2937', marginBottom: 10 },
   timeDisplay: { backgroundColor: '#F3F4F6', borderRadius: 8, padding: 10, alignItems: 'center', marginBottom: 10 },
@@ -745,11 +838,11 @@ const s = StyleSheet.create({
   quickSetBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: '#EEF2FF', borderRadius: 8, padding: 10, marginTop: 6, borderWidth: 1, borderColor: '#DBEAFE' },
   quickSetBtnText: { color: '#6695FC', fontSize: 13, fontWeight: '500' },
 
-  scrubTrack: { height: 6, backgroundColor: '#E5E7EB', borderRadius: 3 },
-  scrubRange: { position: 'absolute', height: 6, backgroundColor: '#6695FC', borderRadius: 3, top: 21 },
-  scrubPlayhead: { position: 'absolute', width: 2, height: 48, backgroundColor: '#1F2937', top: 0, marginLeft: -1 },
-  scrubHandle: { position: 'absolute', width: 20, height: 36, backgroundColor: '#6695FC', borderRadius: 6, top: 6, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 3 },
-  scrubHandleBar: { width: 2, height: 14, backgroundColor: 'rgba(255,255,255,0.8)', borderRadius: 1 },
+  scrubTrack: { height: 4, backgroundColor: '#E5E7EB', borderRadius: 2 },
+  scrubRange: { position: 'absolute', height: 4, backgroundColor: '#6695FC', borderRadius: 2, top: 15 },
+  scrubPlayhead: { position: 'absolute', width: 2, height: 34, backgroundColor: '#1F2937', top: 0, marginLeft: -1 },
+  scrubHandle: { position: 'absolute', width: 16, height: 26, backgroundColor: '#6695FC', borderRadius: 4, top: 4, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 2 },
+  scrubHandleBar: { width: 2, height: 10, backgroundColor: 'rgba(255,255,255,0.8)', borderRadius: 1 },
   scrubLabelBlue: { fontSize: 11, color: '#6695FC', fontFamily: 'monospace', fontWeight: '600' },
   scrubLabelGray: { fontSize: 11, color: '#9CA3AF', fontFamily: 'monospace' },
 
@@ -776,4 +869,17 @@ const s = StyleSheet.create({
   iconGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   iconCell: { width: '22%', backgroundColor: '#fff', borderRadius: 10, padding: 12, alignItems: 'center' },
   iconLabel: { fontSize: 10, color: '#5A5F67', marginTop: 6, fontWeight: '500' },
+
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', alignItems: 'center', justifyContent: 'center' },
+  modalBox: { backgroundColor: '#fff', borderRadius: 16, padding: 24, width: 360, shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 12, elevation: 8 },
+  modalTitle: { fontSize: 18, fontWeight: '700', color: '#1F2937', marginBottom: 16 },
+  modalInput: { backgroundColor: '#F3F4F6', borderRadius: 8, padding: 12, fontSize: 15, borderWidth: 1, borderColor: '#E5E7EB', color: '#1F2937', marginBottom: 20 },
+  modalBtnRow: { flexDirection: 'row', gap: 10 },
+  modalCancelBtn: { flex: 1, paddingVertical: 11, borderRadius: 8, borderWidth: 1, borderColor: '#E5E7EB', alignItems: 'center' },
+  modalCancelText: { fontSize: 14, fontWeight: '500', color: '#5A5F67' },
+  modalCreateBtn: { flex: 1, paddingVertical: 11, borderRadius: 8, backgroundColor: '#6695FC', alignItems: 'center' },
+  modalCreateText: { fontSize: 14, fontWeight: '600', color: '#fff' },
+
+  deleteBtn: { padding: 6 },
+  playPauseBtn: { width: 36, height: 36, borderRadius: 18, backgroundColor: '#6695FC', alignItems: 'center', justifyContent: 'center', paddingLeft: 2 },
 });
